@@ -9,6 +9,7 @@ local maxGangsPerPlayer = GetConvarInt('qbx:max_gangs_per_player', 1)
 local setJobReplaces = GetConvar('qbx:setjob_replaces', 'true') == 'true'
 local setGangReplaces = GetConvar('qbx:setgang_replaces', 'true') == 'true'
 local loadingPlayers = {}
+local loadingCitizens = {}
 local pendingInventorySaves = {}
 local inventorySaveLocks = {}
 
@@ -80,7 +81,6 @@ local function saveInventorySnapshot(playerData)
 end
 
 local function flushPendingInventory(citizenid)
-    if not pendingInventorySaves[citizenid] then return true end
     acquireInventorySave(citizenid)
     local pending = pendingInventorySaves[citizenid]
     if not pending then inventorySaveLocks[citizenid] = nil; return true end
@@ -105,10 +105,12 @@ function FlushPendingInventories()
 end
 
 function InventorySessionsQuiescent()
-    return next(QBX.Players) == nil and next(loadingPlayers) == nil and next(inventorySaveLocks) == nil
+    return next(QBX.Players) == nil and next(loadingPlayers) == nil and next(loadingCitizens) == nil and next(inventorySaveLocks) == nil
 end
 
 function CancelLoadingPlayer(source)
+    local token = loadingPlayers[source]
+    if token and loadingCitizens[token.citizenid] == token then loadingCitizens[token.citizenid] = nil end
     loadingPlayers[source] = nil
 end
 
@@ -1041,19 +1043,21 @@ function CreatePlayer(playerData, Offline)
     local loadingToken
     if not self.Offline then
         local src = self.PlayerData.source
-        if loadingPlayers[src] or QBX.Players[src] then return nil end
-        loadingToken = {}
+        if loadingPlayers[src] or loadingCitizens[self.PlayerData.citizenid] or QBX.Players[src] or
+            GetPlayerByCitizenId(self.PlayerData.citizenid) then return nil end
+        loadingToken = { citizenid = self.PlayerData.citizenid }
         loadingPlayers[src] = loadingToken
+        loadingCitizens[self.PlayerData.citizenid] = loadingToken
     end
 
     if not flushPendingInventory(self.PlayerData.citizenid) then
-        if loadingToken then loadingPlayers[self.PlayerData.source] = nil end
+        if loadingToken then CancelLoadingPlayer(self.PlayerData.source) end
         error(('Inventory backend could not flush pending data for character %s'):format(self.PlayerData.citizenid))
     end
 
     local loadedSuccessfully, loadedItems = pcall(inventory.load, self.Offline and nil or self.PlayerData.source, self.PlayerData.citizenid)
     if not loadedSuccessfully or type(loadedItems) ~= 'table' then
-        if loadingToken and loadingPlayers[self.PlayerData.source] == loadingToken then loadingPlayers[self.PlayerData.source] = nil end
+        if loadingToken and loadingPlayers[self.PlayerData.source] == loadingToken then CancelLoadingPlayer(self.PlayerData.source) end
 
         if not loadedSuccessfully then error(loadedItems) end
         error(('Inventory backend %s returned invalid data for character %s'):format(inventory.resourceName, self.PlayerData.citizenid))
@@ -1063,12 +1067,13 @@ function CreatePlayer(playerData, Offline)
     if not self.Offline then
         local src = self.PlayerData.source
         local license = GetPlayerIdentifierByType(src, 'license2') or GetPlayerIdentifierByType(src, 'license')
-        if loadingPlayers[src] ~= loadingToken or not GetPlayerName(src) or
+        if loadingPlayers[src] ~= loadingToken or loadingCitizens[self.PlayerData.citizenid] ~= loadingToken or
+            GetPlayerByCitizenId(self.PlayerData.citizenid) or not GetPlayerName(src) or
             (self.PlayerData.license ~= license and self.PlayerData.license ~= GetPlayerIdentifierByType(src, 'license')) then
-            if loadingPlayers[src] == loadingToken then loadingPlayers[src] = nil end
+            if loadingPlayers[src] == loadingToken then CancelLoadingPlayer(src) end
             return nil
         end
-        loadingPlayers[src] = nil
+        CancelLoadingPlayer(src)
         QBX.Players[src] = self
         QBX.RegisterPlayer(self)
         local ped = GetPlayerPed(self.PlayerData.source)
