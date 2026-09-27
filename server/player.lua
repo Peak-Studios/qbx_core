@@ -8,6 +8,21 @@ local maxJobsPerPlayer = GetConvarInt('qbx:max_jobs_per_player', 1)
 local maxGangsPerPlayer = GetConvarInt('qbx:max_gangs_per_player', 1)
 local setJobReplaces = GetConvar('qbx:setjob_replaces', 'true') == 'true'
 local setGangReplaces = GetConvar('qbx:setgang_replaces', 'true') == 'true'
+local loadingPlayers = {}
+local pendingInventorySaves = {}
+local inventorySaveLocks = {}
+
+local function acquireInventorySave(citizenid)
+    while inventorySaveLocks[citizenid] do Wait(0) end
+    inventorySaveLocks[citizenid] = true
+end
+
+local function inventorySnapshot(playerData)
+    if type(playerData) ~= 'table' or type(playerData.citizenid) ~= 'string' or type(playerData.items) ~= 'table' then return end
+    local ok, items = pcall(function() return json.decode(json.encode(playerData.items)) end)
+    if not ok or type(items) ~= 'table' then return end
+    return { citizenid = playerData.citizenid, items = items }
+end
 
 -- Numeric metadata mirrored from client statebags. Values are validated and
 -- clamped before being persisted, so a spoofed statebag can't corrupt or crash
@@ -45,6 +60,69 @@ local function saveInventory(identifier, offline)
     end
     return true
 end
+
+local function saveInventorySnapshot(playerData)
+    if not playerData or type(playerData.citizenid) ~= 'string' then return false end
+    acquireInventorySave(playerData.citizenid)
+    local snapshot = inventorySnapshot(playerData)
+    if not snapshot then
+        inventorySaveLocks[playerData.citizenid] = nil
+        return false
+    end
+    local saved = saveInventory(snapshot, true)
+    if saved then
+        pendingInventorySaves[snapshot.citizenid] = nil
+    else
+        pendingInventorySaves[snapshot.citizenid] = snapshot
+    end
+    inventorySaveLocks[snapshot.citizenid] = nil
+    return saved
+end
+
+local function flushPendingInventory(citizenid)
+    if not pendingInventorySaves[citizenid] then return true end
+    acquireInventorySave(citizenid)
+    local pending = pendingInventorySaves[citizenid]
+    if not pending then inventorySaveLocks[citizenid] = nil; return true end
+    local player = GetPlayerByCitizenId(citizenid)
+    local snapshot = player and inventorySnapshot(player.PlayerData) or pending
+    local saved = snapshot and saveInventory(snapshot, true) or false
+    if saved then
+        if pendingInventorySaves[citizenid] == pending then pendingInventorySaves[citizenid] = nil end
+    elseif snapshot then
+        pendingInventorySaves[citizenid] = snapshot
+    end
+    inventorySaveLocks[citizenid] = nil
+    return saved
+end
+
+function FlushPendingInventories()
+    local allSaved = true
+    for citizenid in pairs(pendingInventorySaves) do
+        if not flushPendingInventory(citizenid) then allSaved = false end
+    end
+    return allSaved
+end
+
+function InventorySessionsQuiescent()
+    return next(QBX.Players) == nil and next(loadingPlayers) == nil and next(inventorySaveLocks) == nil
+end
+
+function CancelLoadingPlayer(source)
+    loadingPlayers[source] = nil
+end
+
+CreateThread(function()
+    while true do
+        Wait(30000)
+        if not QBX.InventoryMigrationInProgress then FlushPendingInventories() end
+    end
+end)
+
+AddEventHandler('onResourceStop', function(resource)
+    if resource ~= GetCurrentResourceName() then return end
+    FlushPendingInventories()
+end)
 
 ---@param citizenid string
 ---@return false
@@ -102,7 +180,7 @@ function Login(source, citizenid, newData)
         return false
     end
 
-    if QBX.Players[source] then
+    if QBX.Players[source] or loadingPlayers[source] then
         dropForExploit(source, ('%s [%s] Dropped for attempting to login twice'):format(GetPlayerName(tostring(source)), tostring(source)))
         return false
     end
@@ -125,6 +203,7 @@ function Login(source, citizenid, newData)
         newData.userId = userId
 
         local player = CheckPlayerData(source, newData)
+        if not player then return false end
         Save(player.PlayerData.source)
         return true
     end
@@ -947,9 +1026,9 @@ function CreatePlayer(playerData, Offline)
     ---@deprecated use Save or SaveOffline instead
     function self.Functions.Save()
         if self.Offline then
-            SaveOffline(self.PlayerData)
+            return SaveOffline(self.PlayerData)
         else
-            Save(self.PlayerData.source)
+            return Save(self.PlayerData.source)
         end
     end
 
@@ -959,17 +1038,22 @@ function CreatePlayer(playerData, Offline)
         Logout(self.PlayerData.source)
     end
 
+    local loadingToken
     if not self.Offline then
-        QBX.Players[self.PlayerData.source] = self
-        QBX.RegisterPlayer(self)
+        local src = self.PlayerData.source
+        if loadingPlayers[src] or QBX.Players[src] then return nil end
+        loadingToken = {}
+        loadingPlayers[src] = loadingToken
+    end
+
+    if not flushPendingInventory(self.PlayerData.citizenid) then
+        if loadingToken then loadingPlayers[self.PlayerData.source] = nil end
+        error(('Inventory backend could not flush pending data for character %s'):format(self.PlayerData.citizenid))
     end
 
     local loadedSuccessfully, loadedItems = pcall(inventory.load, self.Offline and nil or self.PlayerData.source, self.PlayerData.citizenid)
     if not loadedSuccessfully or type(loadedItems) ~= 'table' then
-        if not self.Offline then
-            QBX.UnregisterPlayer(self.PlayerData.source)
-            QBX.Players[self.PlayerData.source] = nil
-        end
+        if loadingToken and loadingPlayers[self.PlayerData.source] == loadingToken then loadingPlayers[self.PlayerData.source] = nil end
 
         if not loadedSuccessfully then error(loadedItems) end
         error(('Inventory backend %s returned invalid data for character %s'):format(inventory.resourceName, self.PlayerData.citizenid))
@@ -977,6 +1061,16 @@ function CreatePlayer(playerData, Offline)
     self.PlayerData.items = loadedItems
 
     if not self.Offline then
+        local src = self.PlayerData.source
+        local license = GetPlayerIdentifierByType(src, 'license2') or GetPlayerIdentifierByType(src, 'license')
+        if loadingPlayers[src] ~= loadingToken or not GetPlayerName(src) or
+            (self.PlayerData.license ~= license and self.PlayerData.license ~= GetPlayerIdentifierByType(src, 'license')) then
+            if loadingPlayers[src] == loadingToken then loadingPlayers[src] = nil end
+            return nil
+        end
+        loadingPlayers[src] = nil
+        QBX.Players[src] = self
+        QBX.RegisterPlayer(self)
         local ped = GetPlayerPed(self.PlayerData.source)
         SetPedArmour(ped, self.PlayerData.metadata.armor)
         -- At this point we are safe to emit new instance to third party resource for load handling
@@ -1102,7 +1196,7 @@ function Save(source)
         playerData.metadata.stress = playerState.stress or 0
     end
 
-    local inventorySaved = saveInventory(source)
+    local inventorySaved = saveInventorySnapshot(playerData)
 
     CreateThread(function()
         storage.upsertPlayerEntity({
@@ -1123,7 +1217,7 @@ function SaveOffline(playerData)
         return
     end
 
-    local inventorySaved = saveInventory(playerData, true)
+    local inventorySaved = saveInventorySnapshot(playerData)
 
     CreateThread(function()
         storage.upsertPlayerEntity({

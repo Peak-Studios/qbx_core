@@ -247,7 +247,7 @@ local function migrateOxInventories()
     if next(require 'shared.items_imported') == nil and next(QBX.Shared.Items) == nil then
         error('import and review item definitions before migrating inventories')
     end
-    if #GetPlayers() > 0 then error('stop or disconnect all player sessions before migrating player inventories') end
+    if #GetPlayers() > 0 or not InventorySessionsQuiescent() then error('stop or disconnect all player sessions and wait for inventory saves before migrating') end
 
     if not tableExists('players') then error('players table was not found') end
 
@@ -441,7 +441,7 @@ local function migrateOxInventories()
         end
     end
 
-    if #GetPlayers() > 0 then error('a player session appeared during migration validation; no inventory rows were changed') end
+    if #GetPlayers() > 0 or not InventorySessionsQuiescent() then error('a player session or inventory save appeared during migration validation; no inventory rows were changed') end
 
     if #queries > 0 and not MySQL.transaction.await(queries) then
         error('database transaction failed; all source changes were rolled back and backups remain available')
@@ -459,7 +459,8 @@ end
 RegisterCommand('qbx_migrateOxInventory', function(source)
     if source ~= 0 then return lib.print.warn('qbx_migrateOxInventory can only be run from the server console') end
     if QBX.InventoryMigrationInProgress then return lib.print.warn('An inventory migration is already in progress') end
-    if #GetPlayers() > 0 then return lib.print.error('Stop or disconnect all player sessions before migrating player inventories') end
+    if #GetPlayers() > 0 or not InventorySessionsQuiescent() then return lib.print.error('Stop or disconnect all player sessions and wait for inventory saves before migrating') end
+    if not FlushPendingInventories() then return lib.print.error('Resolve pending player inventory saves before starting migration') end
     QBX.InventoryMigrationInProgress = true
     local ok, err = pcall(migrateOxInventories)
     QBX.InventoryMigrationInProgress = false

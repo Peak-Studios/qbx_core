@@ -37,6 +37,7 @@ end)
 ---@param reason string
 AddEventHandler('playerDropped', function(reason)
     local src = source --[[@as string]]
+    CancelLoadingPlayer(src)
     local license = GetPlayerIdentifierByType(src, 'license2') or GetPlayerIdentifierByType(src, 'license')
     if license then usedLicenses[license] = nil end
     if not QBX.Players[src] then return end
