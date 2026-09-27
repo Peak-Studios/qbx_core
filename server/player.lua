@@ -1051,7 +1051,9 @@ function CreatePlayer(playerData, Offline)
     end
 
     if not flushPendingInventory(self.PlayerData.citizenid) then
-        if loadingToken then CancelLoadingPlayer(self.PlayerData.source) end
+        if loadingToken and loadingPlayers[self.PlayerData.source] == loadingToken then
+            CancelLoadingPlayer(self.PlayerData.source)
+        end
         error(('Inventory backend could not flush pending data for character %s'):format(self.PlayerData.citizenid))
     end
 
