@@ -11,17 +11,18 @@ end
 
 ---@param source Source
 local function giveStarterItems(source)
-    if GetResourceState('ox_inventory') == 'missing' then return end
-    while not exports.ox_inventory:GetInventory(source) do
-        Wait(100)
-    end
+    local player = exports.qbx_core:GetPlayer(source)
+    if not player then return end
+
     for i = 1, #starterItems do
         local item = starterItems[i]
+        local metadata
         if item.metadata and type(item.metadata) == 'function' then
-            exports.ox_inventory:AddItem(source, item.name, item.amount, item.metadata(source))
+            metadata = item.metadata(source)
         else
-            exports.ox_inventory:AddItem(source, item.name, item.amount, item.metadata)
+            metadata = item.metadata
         end
+        player.Functions.AddItem(item.name, item.amount, nil, metadata)
     end
 end
 

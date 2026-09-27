@@ -5,6 +5,13 @@ QBX.PlayerData = {}
 QBX.Shared = require 'shared.main'
 QBX.IsLoggedIn = false
 
+---@return table<string, Item>
+---@overload fun(name: string): Item?
+exports('GetItems', function(name)
+    local items = QBX.Shared.Items
+    return (name and items[name]) or items
+end)
+
 ---@return table<string, Vehicle>
 ---@overload fun(key: string): Vehicle
 function GetVehiclesByName(key)

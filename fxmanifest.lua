@@ -47,6 +47,7 @@ files {
     'data/*.lua',
     'shared/gangs.lua',
     'shared/items.lua',
+    'shared/items_imported.lua',
     'shared/jobs.lua',
     'shared/locations.lua',
     'shared/main.lua',

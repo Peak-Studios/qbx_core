@@ -1,9 +1,9 @@
 function AddDeprecatedFunctions(player)
     if not player then return end
 
-    ---@deprecated call ox_inventory instead
+    ---@deprecated unsupported. Use Player.Functions.GetItemByName instead.
     function player.Functions.GetCardSlot()
-        error('player.Functions.GetCardSlot is unsupported. Call ox_inventory directly')
+        error('player.Functions.GetCardSlot is unsupported. Use Player.Functions.GetItemByName instead.')
     end
 
     ---@deprecated player.Functions.SetMetaData instead
@@ -20,40 +20,36 @@ function AddDeprecatedFunctions(player)
 end
 
 local playerObj = {}
+local inventory = require 'modules.inventory'
 
----@deprecated ox_inventory automatically saves
 ---@param source Source
 function playerObj.SaveInventory(source) -- luacheck: ignore
-    assert(GetResourceState('qb-inventory') ~= 'started', 'qb-inventory is not compatible with qbx_core. use ox_inventory instead')
+    return inventory.save(source)
 end
 
----@deprecated ox_inventory automatically saves
 ---@param playerData PlayerData
 function playerObj.SaveOfflineInventory(playerData) -- luacheck: ignore
-    assert(GetResourceState('qb-inventory') ~= 'started', 'qb-inventory is not compatible with qbx_core. use ox_inventory instead')
+    return inventory.save(playerData, true)
 end
 
----@deprecated call ox_inventory exports directly
 ---@param items any[]
 ---@return number?
 function playerObj.GetTotalWeight(items) -- luacheck: ignore
-    assert(GetResourceState('qb-inventory') ~= 'started', 'qb-inventory is not compatible with qbx_core. use ox_inventory instead')
+    return inventory.getTotalWeight(items)
 end
 
----@deprecated call ox_inventory exports directly
 ---@param items any[]
 ---@param itemName string
 ---@return integer[]? slots
 function playerObj.GetSlotsByItem(items, itemName) -- luacheck: ignore
-    assert(GetResourceState('qb-inventory') ~= 'started', 'qb-inventory is not compatible with qbx_core. use ox_inventory instead')
+    return inventory.getSlotsByItem(items, itemName)
 end
 
----@deprecated call ox_inventory exports directly
 ---@param items any[]
 ---@param itemName string
 ---@return integer? slot
 function playerObj.GetFirstSlotByItem(items, itemName) -- luacheck: ignore
-    assert(GetResourceState('qb-inventory') ~= 'started', 'qb-inventory is not compatible with qbx_core. use ox_inventory instead')
+    return inventory.getFirstSlotByItem(items, itemName)
 end
 
 ---@param source Source

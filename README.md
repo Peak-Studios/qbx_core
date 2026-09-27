@@ -29,7 +29,7 @@ The core makes available several optional modules for developers to import into 
 
 - [oxmysql](https://github.com/overextended/oxmysql)
 - [ox_lib](https://github.com/overextended/ox_lib)
-- [ox_inventory](https://github.com/overextended/ox_inventory)
+- [peak-qb-inventory](https://github.com/Peak-Studios/peak-qb-inventory) (set `qbx:inventoryResource` to override its resource name)
 
 #
 

@@ -1,3 +1,5 @@
----@deprecated This file is deprecated and will be removed in the future. Please add your items directly in ox_inventory/data/items.lua file. Currently items placed in here will be converted at next server restart.
 ---@type table<string, Item>
+--- Qbox and the QB compatibility bridge read item definitions from this table.
+--- Run `qbx_importOxItems` before removing ox_inventory to seed this file from
+--- the current Ox item definitions, then review callback and client behavior.
 return {}

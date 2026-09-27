@@ -1,6 +1,7 @@
 require 'server.functions'
 require 'bridge.qb.server.player'
 local functions = {}
+local inventory = require 'modules.inventory'
 
 local allowMethodOverrides = GetConvar('qbx:allowmethodoverrides', 'true') == 'true'
 local disableMethodOverrideWarning = GetConvar('qbx:disableoverridewarning', 'false') == 'true'
@@ -97,7 +98,7 @@ end
 ---@param source Source
 ---@param item string name
 function functions.UseItem(source, item) -- luacheck: ignore
-    assert(GetResourceState('qb-inventory') ~= 'started', 'qb-inventory is not compatible with qbx_core. use ox_inventory instead')
+    return inventory.useItem(source, item)
 end
 
 local discordLink = GetConvar('qbx:discordlink', 'discord.gg/qbox')
@@ -135,28 +136,17 @@ end
 
 -- Utility functions
 
----@deprecated use https://coxdocs.dev/ox_inventory/Functions/Server#search
 functions.HasItem = function(source, items, amount) -- luacheck: ignore
-    amount = amount or 1
-    local count = exports.ox_inventory:Search(source, 'count', items)
-    if type(items) == 'table' and type(count) == 'table' then
-        for _, v in pairs(count) do
-            if v < amount then
-                return false
-            end
-        end
-        return true
-    end
-    return count >= amount
+    return inventory.hasItem(source, items, amount)
 end
 
 ---@deprecated use qbx.getVehiclePlate from modules/lib.lua
 functions.GetPlate = qbx.getVehiclePlate
 
 -- Single add item
----@deprecated incompatible with ox_inventory. Update ox_inventory item config instead.
+---@deprecated Add item definitions to qbx_core/shared/items.lua instead.
 local function AddItem(itemName, item)
-    lib.print.warn(('%s invoked deprecated function AddItem. This is incompatible with ox_inventory'):format(GetInvokingResource() or 'unknown resource'))
+    lib.print.warn(('%s invoked deprecated function AddItem. Put item definitions in qbx_core/shared/items.lua instead'):format(GetInvokingResource() or 'unknown resource'))
     if type(itemName) ~= 'string' then
         return false, 'invalid_item_name'
     end
@@ -165,7 +155,7 @@ local function AddItem(itemName, item)
         return false, 'item_exists'
     end
 
-    lib.print.warn(('New item %s added but not found in ox_inventory. Printing item data'):format(itemName))
+    lib.print.warn(('New item %s was registered at runtime. Add it to qbx_core/shared/items.lua for persistence'):format(itemName))
     lib.print.warn(item)
     qbCoreCompat.Shared.Items[itemName] = item
 
@@ -177,9 +167,9 @@ end
 registerQbFunction('AddItem', AddItem)
 
 -- Single update item
----@deprecated incompatible with ox_inventory. Update ox_inventory item config instead.
+---@deprecated Add item definitions to qbx_core/shared/items.lua instead.
 local function UpdateItem(itemName, item)
-    lib.print.warn(('%s invoked deprecated function UpdateItem. This is incompatible with ox_inventory'):format(GetInvokingResource() or 'unknown resource'))
+    lib.print.warn(('%s invoked deprecated function UpdateItem. Put item definitions in qbx_core/shared/items.lua instead'):format(GetInvokingResource() or 'unknown resource'))
     if type(itemName) ~= 'string' then
         return false, 'invalid_item_name'
     end
@@ -195,9 +185,9 @@ end
 registerQbFunction('UpdateItem', UpdateItem)
 
 -- Multiple Add Items
----@deprecated incompatible with ox_inventory. Update ox_inventory item config instead.
+---@deprecated Add item definitions to qbx_core/shared/items.lua instead.
 local function AddItems(items)
-    lib.print.warn(('%s invoked deprecated function AddItems. This is incompatible with ox_inventory'):format(GetInvokingResource() or 'unknown resource'))
+    lib.print.warn(('%s invoked deprecated function AddItems. Put item definitions in qbx_core/shared/items.lua instead'):format(GetInvokingResource() or 'unknown resource'))
     local shouldContinue = true
     local message = 'success'
     local errorItem = nil
@@ -216,7 +206,7 @@ local function AddItems(items)
             errorItem = items[key]
             break
         end
-        lib.print.warn(('New item %s added but not found in ox_inventory. Printing item data'):format(key))
+        lib.print.warn(('New item %s was registered at runtime. Add it to qbx_core/shared/items.lua for persistence'):format(key))
         lib.print.warn(value)
 
         qbCoreCompat.Shared.Items[key] = value
@@ -231,9 +221,9 @@ end
 registerQbFunction('AddItems', AddItems)
 
 -- Single Remove Item
----@deprecated incompatible with ox_inventory. Update ox_inventory item config instead.
+---@deprecated Remove item definitions from qbx_core/shared/items.lua instead.
 local function RemoveItem(itemName)
-    lib.print.warn(('%s invoked deprecated function RemoveItem. This is incompatible with ox_inventory'):format(GetInvokingResource() or 'unknown resource'))
+    lib.print.warn(('%s invoked deprecated function RemoveItem. Update qbx_core/shared/items.lua instead'):format(GetInvokingResource() or 'unknown resource'))
     if type(itemName) ~= 'string' then
         return false, 'invalid_item_name'
     end

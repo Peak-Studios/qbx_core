@@ -2,17 +2,16 @@ local config = require 'config.server'
 local defaultSpawn = require 'config.shared'.defaultSpawn
 local logger = require 'modules.logger'
 local storage = require 'server.storage.main'
+local inventory = require 'modules.inventory'
 local triggerEventHooks = require 'modules.hooks'
 local maxJobsPerPlayer = GetConvarInt('qbx:max_jobs_per_player', 1)
 local maxGangsPerPlayer = GetConvarInt('qbx:max_gangs_per_player', 1)
 local setJobReplaces = GetConvar('qbx:setjob_replaces', 'true') == 'true'
 local setGangReplaces = GetConvar('qbx:setgang_replaces', 'true') == 'true'
-local accounts = json.decode(GetConvar('inventory:accounts', '["money"]'))
-local accountsAsItems = table.create(0, #accounts)
-
-for i = 1, #accounts do
-    accountsAsItems[accounts[i]] = 0
-end
+local accounts = json.decode(GetConvar('inventory:accounts', '["money"]')) or { 'money' }
+if type(accounts) ~= 'table' then accounts = { 'money' } end
+local accountsAsItems = {}
+for i = 1, #accounts do accountsAsItems[accounts[i]] = true end
 
 -- Numeric metadata mirrored from client statebags. Values are validated and
 -- clamped before being persisted, so a spoofed statebag can't corrupt or crash
@@ -67,8 +66,30 @@ end
 
 ---@param name string
 ---@return string
-local function toOxAccountName(name)
+local function toAccountItemName(name)
     return name == 'cash' and 'money' or name
+end
+
+local function syncAccountItem(source, account, balance)
+    local itemName = toAccountItemName(account)
+    if not accountsAsItems[itemName] then return end
+
+    local currentAmount = inventory.getItemCount(source, itemName) or 0
+    if balance > currentAmount then
+        if not inventory.addItem(source, itemName, balance - currentAmount) then
+            lib.print.warn(('Unable to sync %s account item for player %s'):format(itemName, source))
+        end
+    elseif currentAmount > balance then
+        local toRemove = currentAmount - balance
+        for _, item in ipairs(inventory.getItemsByName(source, itemName) or {}) do
+            if toRemove <= 0 then break end
+            local amount = math.min(toRemove, tonumber(item.amount) or 0)
+            if amount > 0 and inventory.removeItem(source, itemName, amount, item.slot) then
+                toRemove = toRemove - amount
+            end
+        end
+        if toRemove > 0 then lib.print.warn(('Unable to sync %s account item for player %s'):format(itemName, source)) end
+    end
 end
 
 ---@param source Source
@@ -729,7 +750,7 @@ function CheckPlayerData(source, playerData)
     }
     playerData.gangs = gangs or {}
     playerData.position = playerData.position or defaultSpawn
-    playerData.items = {}
+    playerData.items = playerData.items or {}
     return CreatePlayer(playerData --[[@as PlayerData]], Offline)
 end
 
@@ -872,75 +893,54 @@ function CreatePlayer(playerData, Offline)
         return GetMoney(self.PlayerData.source, moneytype)
     end
 
-    local function qbItemCompat(item)
-        if not item then return end
-
-        item.info = item.metadata
-        item.amount = item.count
-
-        return item
-    end
-
-    ---@param item string
-    ---@return string
-    local function oxItemCompat(item)
-        return toOxAccountName(item)
-    end
-
-    ---@deprecated use ox_inventory exports directly
     ---@param item string
     ---@param amount number
-    ---@param metadata? table
     ---@param slot? number
+    ---@param metadata? table
     ---@return boolean success
     function self.Functions.AddItem(item, amount, slot, metadata)
         assert(not self.Offline, 'unsupported for offline players')
-        return exports.ox_inventory:AddItem(self.PlayerData.source, oxItemCompat(item), amount, metadata, slot)
+        return inventory.addItem(self.PlayerData.source, item, amount, slot, metadata)
     end
 
-    ---@deprecated use ox_inventory exports directly
     ---@param item string
     ---@param amount number
     ---@param slot? number
     ---@return boolean success
     function self.Functions.RemoveItem(item, amount, slot)
         assert(not self.Offline, 'unsupported for offline players')
-        return exports.ox_inventory:RemoveItem(self.PlayerData.source, oxItemCompat(item), amount, nil, slot)
+        return inventory.removeItem(self.PlayerData.source, item, amount, slot)
     end
 
-    ---@deprecated use ox_inventory exports directly
     ---@param slot number
-    ---@return any table
+    ---@return table?
     function self.Functions.GetItemBySlot(slot)
         assert(not self.Offline, 'unsupported for offline players')
-        return qbItemCompat(exports.ox_inventory:GetSlot(self.PlayerData.source, slot))
+        return inventory.getItemBySlot(self.PlayerData.source, slot)
     end
 
-    ---@deprecated use ox_inventory exports directly
     ---@param itemName string
-    ---@return any table
+    ---@return table?
     function self.Functions.GetItemByName(itemName)
         assert(not self.Offline, 'unsupported for offline players')
-        return qbItemCompat(exports.ox_inventory:GetSlotWithItem(self.PlayerData.source, oxItemCompat(itemName)))
+        return inventory.getItemByName(self.PlayerData.source, itemName)
     end
 
-    ---@deprecated use ox_inventory exports directly
     ---@param itemName string
-    ---@return any table
+    ---@return table[]?
     function self.Functions.GetItemsByName(itemName)
         assert(not self.Offline, 'unsupported for offline players')
-        return qbItemCompat(exports.ox_inventory:GetSlotsWithItem(self.PlayerData.source, oxItemCompat(itemName)))
+        return inventory.getItemsByName(self.PlayerData.source, itemName)
     end
 
-    ---@deprecated use ox_inventory exports directly
-    function self.Functions.ClearInventory()
+    function self.Functions.ClearInventory(filterItems)
         assert(not self.Offline, 'unsupported for offline players')
-        return exports.ox_inventory:ClearInventory(self.PlayerData.source)
+        return inventory.clear(self.PlayerData.source, filterItems)
     end
 
-    ---@deprecated use ox_inventory exports directly
-    function self.Functions.SetInventory()
-        error('Player.Functions.SetInventory is unsupported for ox_inventory. Try ClearInventory, then add the desired items.')
+    function self.Functions.SetInventory(items)
+        assert(not self.Offline, 'unsupported for offline players')
+        return inventory.set(self.PlayerData.source, items)
     end
 
     ---@deprecated use SetCharInfo instead
@@ -970,12 +970,30 @@ function CreatePlayer(playerData, Offline)
     if not self.Offline then
         QBX.Players[self.PlayerData.source] = self
         QBX.RegisterPlayer(self)
+    end
+
+    local loadedSuccessfully, loadedItems = pcall(inventory.load, self.Offline and nil or self.PlayerData.source, self.PlayerData.citizenid)
+    if not loadedSuccessfully or type(loadedItems) ~= 'table' then
+        if not self.Offline then
+            QBX.UnregisterPlayer(self.PlayerData.source)
+            QBX.Players[self.PlayerData.source] = nil
+        end
+
+        if not loadedSuccessfully then error(loadedItems) end
+        error(('Inventory backend %s returned invalid data for character %s'):format(inventory.resourceName, self.PlayerData.citizenid))
+    end
+    self.PlayerData.items = loadedItems
+
+    if not self.Offline then
+        for moneyType, balance in pairs(self.PlayerData.money) do
+            syncAccountItem(self.PlayerData.source, moneyType, balance)
+        end
+
         local ped = GetPlayerPed(self.PlayerData.source)
         SetPedArmour(ped, self.PlayerData.metadata.armor)
         -- At this point we are safe to emit new instance to third party resource for load handling
         GlobalState.PlayerCount += 1
         UpdatePlayerData(self.PlayerData.source)
-        Player(self.PlayerData.source).state:set('loadInventory', true, true)
         TriggerEvent('QBCore:Server:PlayerLoaded', self)
     end
 
@@ -1096,13 +1114,14 @@ function Save(source)
         playerData.metadata.stress = playerState.stress or 0
     end
 
+    inventory.save(source)
+
     CreateThread(function()
         storage.upsertPlayerEntity({
             playerEntity = playerData,
             position = pcoords,
         })
     end)
-    assert(GetResourceState('qb-inventory') ~= 'started', 'qb-inventory is not compatible with qbx_core. use ox_inventory instead')
     lib.print.verbose(('%s PLAYER SAVED!'):format(playerData.name))
 end
 
@@ -1115,13 +1134,14 @@ function SaveOffline(playerData)
         return
     end
 
+    inventory.save(playerData, true)
+
     CreateThread(function()
         storage.upsertPlayerEntity({
             playerEntity = playerData,
             position = playerData.position.xyz
         })
     end)
-    assert(GetResourceState('qb-inventory') ~= 'started', 'qb-inventory is not compatible with qbx_core. use ox_inventory instead')
     lib.print.verbose(('%s OFFLINE PLAYER SAVED!'):format(playerData.name))
 end
 
@@ -1294,11 +1314,7 @@ local function emitMoneyEvents(source, playerMoney, moneyType, amount, actionTyp
         TriggerClientEvent('qb-phone:client:RemoveBankMoney', source, amount)
     end
 
-    local oxMoneyType = toOxAccountName(moneyType)
-
-    if accountsAsItems[oxMoneyType] then
-        exports.ox_inventory:SetItem(source, oxMoneyType, playerMoney[moneyType])
-    end
+    syncAccountItem(source, moneyType, playerMoney[moneyType])
 end
 
 ---@param value unknown

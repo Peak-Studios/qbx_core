@@ -3,6 +3,10 @@ qbShared.ForceJobDefaultDutyAtLogin = true -- true: Force duty state to jobdefau
 qbShared.Locations = require 'shared.locations'
 qbShared.Vehicles = require 'shared.vehicles'
 qbShared.Weapons = require 'shared.weapons'
+qbShared.Items = require 'shared.items'
+for name, item in pairs(require 'shared.items_imported') do
+    if qbShared.Items[name] == nil then qbShared.Items[name] = item end
+end
 
 ---@type table<number, Vehicle>
 qbShared.VehicleHashes = {}
