@@ -1,4 +1,4 @@
----@deprecated This file is deprecated. If you are utilizing QB-Core bridge functionality you will need to populate weapons here for them to be available in QBCore.Shared.Weapons. If not please add your weapons in ox_inventory/data/weapons.lua file.
+--- Qbox and the QB compatibility bridge read weapon definitions from this table.
 ---@type table<number, Weapon>
 return {
     -- // WEAPONS

@@ -2,16 +2,27 @@ local config = require 'config.server'
 local defaultSpawn = require 'config.shared'.defaultSpawn
 local logger = require 'modules.logger'
 local storage = require 'server.storage.main'
+local inventory = require 'modules.inventory'
 local triggerEventHooks = require 'modules.hooks'
 local maxJobsPerPlayer = GetConvarInt('qbx:max_jobs_per_player', 1)
 local maxGangsPerPlayer = GetConvarInt('qbx:max_gangs_per_player', 1)
 local setJobReplaces = GetConvar('qbx:setjob_replaces', 'true') == 'true'
 local setGangReplaces = GetConvar('qbx:setgang_replaces', 'true') == 'true'
-local accounts = json.decode(GetConvar('inventory:accounts', '["money"]'))
-local accountsAsItems = table.create(0, #accounts)
+local loadingPlayers = {}
+local loadingCitizens = {}
+local pendingInventorySaves = {}
+local inventorySaveLocks = {}
 
-for i = 1, #accounts do
-    accountsAsItems[accounts[i]] = 0
+local function acquireInventorySave(citizenid)
+    while inventorySaveLocks[citizenid] do Wait(0) end
+    inventorySaveLocks[citizenid] = true
+end
+
+local function inventorySnapshot(playerData)
+    if type(playerData) ~= 'table' or type(playerData.citizenid) ~= 'string' or type(playerData.items) ~= 'table' then return end
+    local ok, items = pcall(function() return json.decode(json.encode(playerData.items)) end)
+    if not ok or type(items) ~= 'table' then return end
+    return { citizenid = playerData.citizenid, items = items }
 end
 
 -- Numeric metadata mirrored from client statebags. Values are validated and
@@ -37,6 +48,83 @@ local function savePlayer(player)
         Save(player.PlayerData.source)
     end
 end
+
+local function saveInventory(identifier, offline)
+    local ok, saved = pcall(inventory.save, identifier, offline)
+    if not ok then
+        lib.print.error(('Inventory save failed for %s: %s'):format(tostring(identifier), tostring(saved)))
+        return false
+    end
+    if saved ~= true then
+        lib.print.error(('Inventory save failed for %s; the backend did not confirm persistence'):format(tostring(identifier)))
+        return false
+    end
+    return true
+end
+
+local function saveInventorySnapshot(playerData)
+    if not playerData or type(playerData.citizenid) ~= 'string' then return false end
+    acquireInventorySave(playerData.citizenid)
+    local snapshot = inventorySnapshot(playerData)
+    if not snapshot then
+        inventorySaveLocks[playerData.citizenid] = nil
+        return false
+    end
+    local saved = saveInventory(snapshot, true)
+    if saved then
+        pendingInventorySaves[snapshot.citizenid] = nil
+    else
+        pendingInventorySaves[snapshot.citizenid] = snapshot
+    end
+    inventorySaveLocks[snapshot.citizenid] = nil
+    return saved
+end
+
+local function flushPendingInventory(citizenid)
+    acquireInventorySave(citizenid)
+    local pending = pendingInventorySaves[citizenid]
+    if not pending then inventorySaveLocks[citizenid] = nil; return true end
+    local player = GetPlayerByCitizenId(citizenid)
+    local snapshot = player and inventorySnapshot(player.PlayerData) or pending
+    local saved = snapshot and saveInventory(snapshot, true) or false
+    if saved then
+        if pendingInventorySaves[citizenid] == pending then pendingInventorySaves[citizenid] = nil end
+    elseif snapshot then
+        pendingInventorySaves[citizenid] = snapshot
+    end
+    inventorySaveLocks[citizenid] = nil
+    return saved
+end
+
+function FlushPendingInventories()
+    local allSaved = true
+    for citizenid in pairs(pendingInventorySaves) do
+        if not flushPendingInventory(citizenid) then allSaved = false end
+    end
+    return allSaved
+end
+
+function InventorySessionsQuiescent()
+    return next(QBX.Players) == nil and next(loadingPlayers) == nil and next(loadingCitizens) == nil and next(inventorySaveLocks) == nil
+end
+
+function CancelLoadingPlayer(source)
+    local token = loadingPlayers[source]
+    if token and loadingCitizens[token.citizenid] == token then loadingCitizens[token.citizenid] = nil end
+    loadingPlayers[source] = nil
+end
+
+CreateThread(function()
+    while true do
+        Wait(30000)
+        if not QBX.InventoryMigrationInProgress then FlushPendingInventories() end
+    end
+end)
+
+AddEventHandler('onResourceStop', function(resource)
+    if resource ~= GetCurrentResourceName() then return end
+    FlushPendingInventories()
+end)
 
 ---@param citizenid string
 ---@return false
@@ -65,12 +153,6 @@ local function getLoadedOrOfflinePlayer(citizenid)
     return GetPlayerByCitizenId(citizenid) or GetOfflinePlayer(citizenid)
 end
 
----@param name string
----@return string
-local function toOxAccountName(name)
-    return name == 'cash' and 'money' or name
-end
-
 ---@param source Source
 ---@param message string
 local function dropForExploit(source, message)
@@ -90,12 +172,17 @@ end
 ---@param newData? PlayerEntity
 ---@return boolean success
 function Login(source, citizenid, newData)
+    if QBX.InventoryMigrationInProgress then
+        lib.print.warn(('Rejected character login for %s while inventory migration is in progress'):format(tostring(source)))
+        return false
+    end
+
     if not source or source == '' then
         lib.print.error('No source given at login stage')
         return false
     end
 
-    if QBX.Players[source] then
+    if QBX.Players[source] or loadingPlayers[source] then
         dropForExploit(source, ('%s [%s] Dropped for attempting to login twice'):format(GetPlayerName(tostring(source)), tostring(source)))
         return false
     end
@@ -118,6 +205,7 @@ function Login(source, citizenid, newData)
         newData.userId = userId
 
         local player = CheckPlayerData(source, newData)
+        if not player then return false end
         Save(player.PlayerData.source)
         return true
     end
@@ -729,7 +817,7 @@ function CheckPlayerData(source, playerData)
     }
     playerData.gangs = gangs or {}
     playerData.position = playerData.position or defaultSpawn
-    playerData.items = {}
+    playerData.items = playerData.items or {}
     return CreatePlayer(playerData --[[@as PlayerData]], Offline)
 end
 
@@ -744,7 +832,10 @@ function Logout(source)
     player.PlayerData.metadata.stress = playerState?.stress or player.PlayerData.metadata.stress
 
     player.PlayerData.lastLoggedOut = os.time()
-    Save(player.PlayerData.source)
+    if not Save(player.PlayerData.source) then
+        lib.print.error(('Logout for %s stopped because inventory persistence failed'):format(tostring(source)))
+        return false
+    end
 
     TriggerClientEvent('QBCore:Client:OnPlayerUnload', source)
     TriggerEvent('QBCore:Server:OnPlayerUnload', source)
@@ -755,6 +846,7 @@ function Logout(source)
     GlobalState.PlayerCount -= 1
     TriggerClientEvent('qbx_core:client:playerLoggedOut', source)
     TriggerEvent('qbx_core:server:playerLoggedOut', source)
+    return true
 end
 
 exports('Logout', Logout)
@@ -766,6 +858,8 @@ exports('Logout', Logout)
 ---@param Offline boolean
 ---@return Player player
 function CreatePlayer(playerData, Offline)
+    if QBX.InventoryMigrationInProgress then error('Cannot create a player while inventory migration is in progress') end
+
     local self = {}
     self.Functions = {}
     self.PlayerData = playerData
@@ -872,75 +966,54 @@ function CreatePlayer(playerData, Offline)
         return GetMoney(self.PlayerData.source, moneytype)
     end
 
-    local function qbItemCompat(item)
-        if not item then return end
-
-        item.info = item.metadata
-        item.amount = item.count
-
-        return item
-    end
-
-    ---@param item string
-    ---@return string
-    local function oxItemCompat(item)
-        return toOxAccountName(item)
-    end
-
-    ---@deprecated use ox_inventory exports directly
     ---@param item string
     ---@param amount number
-    ---@param metadata? table
     ---@param slot? number
+    ---@param metadata? table
     ---@return boolean success
     function self.Functions.AddItem(item, amount, slot, metadata)
         assert(not self.Offline, 'unsupported for offline players')
-        return exports.ox_inventory:AddItem(self.PlayerData.source, oxItemCompat(item), amount, metadata, slot)
+        return inventory.addItem(self.PlayerData.source, item, amount, slot, metadata)
     end
 
-    ---@deprecated use ox_inventory exports directly
     ---@param item string
     ---@param amount number
     ---@param slot? number
     ---@return boolean success
     function self.Functions.RemoveItem(item, amount, slot)
         assert(not self.Offline, 'unsupported for offline players')
-        return exports.ox_inventory:RemoveItem(self.PlayerData.source, oxItemCompat(item), amount, nil, slot)
+        return inventory.removeItem(self.PlayerData.source, item, amount, slot)
     end
 
-    ---@deprecated use ox_inventory exports directly
     ---@param slot number
-    ---@return any table
+    ---@return table?
     function self.Functions.GetItemBySlot(slot)
         assert(not self.Offline, 'unsupported for offline players')
-        return qbItemCompat(exports.ox_inventory:GetSlot(self.PlayerData.source, slot))
+        return inventory.getItemBySlot(self.PlayerData.source, slot)
     end
 
-    ---@deprecated use ox_inventory exports directly
     ---@param itemName string
-    ---@return any table
+    ---@return table?
     function self.Functions.GetItemByName(itemName)
         assert(not self.Offline, 'unsupported for offline players')
-        return qbItemCompat(exports.ox_inventory:GetSlotWithItem(self.PlayerData.source, oxItemCompat(itemName)))
+        return inventory.getItemByName(self.PlayerData.source, itemName)
     end
 
-    ---@deprecated use ox_inventory exports directly
     ---@param itemName string
-    ---@return any table
+    ---@return table[]?
     function self.Functions.GetItemsByName(itemName)
         assert(not self.Offline, 'unsupported for offline players')
-        return qbItemCompat(exports.ox_inventory:GetSlotsWithItem(self.PlayerData.source, oxItemCompat(itemName)))
+        return inventory.getItemsByName(self.PlayerData.source, itemName)
     end
 
-    ---@deprecated use ox_inventory exports directly
-    function self.Functions.ClearInventory()
+    function self.Functions.ClearInventory(filterItems)
         assert(not self.Offline, 'unsupported for offline players')
-        return exports.ox_inventory:ClearInventory(self.PlayerData.source)
+        return inventory.clear(self.PlayerData.source, filterItems)
     end
 
-    ---@deprecated use ox_inventory exports directly
-    function self.Functions.SetInventory()
-        error('Player.Functions.SetInventory is unsupported for ox_inventory. Try ClearInventory, then add the desired items.')
+    function self.Functions.SetInventory(items)
+        assert(not self.Offline, 'unsupported for offline players')
+        return inventory.set(self.PlayerData.source, items)
     end
 
     ---@deprecated use SetCharInfo instead
@@ -955,9 +1028,9 @@ function CreatePlayer(playerData, Offline)
     ---@deprecated use Save or SaveOffline instead
     function self.Functions.Save()
         if self.Offline then
-            SaveOffline(self.PlayerData)
+            return SaveOffline(self.PlayerData)
         else
-            Save(self.PlayerData.source)
+            return Save(self.PlayerData.source)
         end
     end
 
@@ -967,15 +1040,49 @@ function CreatePlayer(playerData, Offline)
         Logout(self.PlayerData.source)
     end
 
+    local loadingToken
     if not self.Offline then
-        QBX.Players[self.PlayerData.source] = self
+        local src = self.PlayerData.source
+        if loadingPlayers[src] or loadingCitizens[self.PlayerData.citizenid] or QBX.Players[src] or
+            GetPlayerByCitizenId(self.PlayerData.citizenid) then return nil end
+        loadingToken = { citizenid = self.PlayerData.citizenid }
+        loadingPlayers[src] = loadingToken
+        loadingCitizens[self.PlayerData.citizenid] = loadingToken
+    end
+
+    if not flushPendingInventory(self.PlayerData.citizenid) then
+        if loadingToken and loadingPlayers[self.PlayerData.source] == loadingToken then
+            CancelLoadingPlayer(self.PlayerData.source)
+        end
+        error(('Inventory backend could not flush pending data for character %s'):format(self.PlayerData.citizenid))
+    end
+
+    local loadedSuccessfully, loadedItems = pcall(inventory.load, self.Offline and nil or self.PlayerData.source, self.PlayerData.citizenid)
+    if not loadedSuccessfully or type(loadedItems) ~= 'table' then
+        if loadingToken and loadingPlayers[self.PlayerData.source] == loadingToken then CancelLoadingPlayer(self.PlayerData.source) end
+
+        if not loadedSuccessfully then error(loadedItems) end
+        error(('Inventory backend %s returned invalid data for character %s'):format(inventory.resourceName, self.PlayerData.citizenid))
+    end
+    self.PlayerData.items = loadedItems
+
+    if not self.Offline then
+        local src = self.PlayerData.source
+        local license = GetPlayerIdentifierByType(src, 'license2') or GetPlayerIdentifierByType(src, 'license')
+        if loadingPlayers[src] ~= loadingToken or loadingCitizens[self.PlayerData.citizenid] ~= loadingToken or
+            GetPlayerByCitizenId(self.PlayerData.citizenid) or not GetPlayerName(src) or
+            (self.PlayerData.license ~= license and self.PlayerData.license ~= GetPlayerIdentifierByType(src, 'license')) then
+            if loadingPlayers[src] == loadingToken then CancelLoadingPlayer(src) end
+            return nil
+        end
+        CancelLoadingPlayer(src)
+        QBX.Players[src] = self
         QBX.RegisterPlayer(self)
         local ped = GetPlayerPed(self.PlayerData.source)
         SetPedArmour(ped, self.PlayerData.metadata.armor)
         -- At this point we are safe to emit new instance to third party resource for load handling
         GlobalState.PlayerCount += 1
         UpdatePlayerData(self.PlayerData.source)
-        Player(self.PlayerData.source).state:set('loadInventory', true, true)
         TriggerEvent('QBCore:Server:PlayerLoaded', self)
     end
 
@@ -1096,14 +1203,16 @@ function Save(source)
         playerData.metadata.stress = playerState.stress or 0
     end
 
+    local inventorySaved = saveInventorySnapshot(playerData)
+
     CreateThread(function()
         storage.upsertPlayerEntity({
             playerEntity = playerData,
             position = pcoords,
         })
     end)
-    assert(GetResourceState('qb-inventory') ~= 'started', 'qb-inventory is not compatible with qbx_core. use ox_inventory instead')
     lib.print.verbose(('%s PLAYER SAVED!'):format(playerData.name))
+    return inventorySaved
 end
 
 exports('Save', Save)
@@ -1115,14 +1224,16 @@ function SaveOffline(playerData)
         return
     end
 
+    local inventorySaved = saveInventorySnapshot(playerData)
+
     CreateThread(function()
         storage.upsertPlayerEntity({
             playerEntity = playerData,
             position = playerData.position.xyz
         })
     end)
-    assert(GetResourceState('qb-inventory') ~= 'started', 'qb-inventory is not compatible with qbx_core. use ox_inventory instead')
     lib.print.verbose(('%s OFFLINE PLAYER SAVED!'):format(playerData.name))
+    return inventorySaved
 end
 
 exports('SaveOffline', SaveOffline)
@@ -1294,11 +1405,6 @@ local function emitMoneyEvents(source, playerMoney, moneyType, amount, actionTyp
         TriggerClientEvent('qb-phone:client:RemoveBankMoney', source, amount)
     end
 
-    local oxMoneyType = toOxAccountName(moneyType)
-
-    if accountsAsItems[oxMoneyType] then
-        exports.ox_inventory:SetItem(source, oxMoneyType, playerMoney[moneyType])
-    end
 end
 
 ---@param value unknown

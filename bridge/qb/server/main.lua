@@ -3,9 +3,6 @@ if GetConvar('qbx:enablebridge', 'true') == 'false' then return end
 require 'bridge.qb.server.debug'
 require 'bridge.qb.server.events'
 
-local convertItems = require 'bridge.qb.shared.compat'.convertItems
-convertItems(require '@ox_inventory.data.items', require 'shared.items')
-
 ---@diagnostic disable-next-line: lowercase-global
 qbCoreCompat = {}
 

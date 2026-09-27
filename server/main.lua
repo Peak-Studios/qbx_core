@@ -2,10 +2,6 @@ lib.versionCheck('Qbox-project/qbx_core')
 local startupErrors, errorMessage
 if not lib.checkDependency('ox_lib', '3.20.0', true) then
     startupErrors, errorMessage = true, 'ox_lib version 3.20.0 or higher is required'
-elseif not lib.checkDependency('ox_inventory', '2.42.1', true) then
-    startupErrors, errorMessage = true, 'ox_inventory version 2.42.1 or higher is required'
-elseif GetConvar('inventory:framework', '') ~= 'qbx' then
-    startupErrors, errorMessage = true, 'inventory:framework must be set to "qbx" in order to use qbx_core'
 elseif GetConvarInt('onesync_enableInfinity', 0) ~= 1 then
     startupErrors, errorMessage = true, 'OneSync Infinity is not enabled. You can do so in txAdmin settings or add +set onesync on to your server startup command line'
 end
@@ -144,6 +140,22 @@ function GetWeapons(key)
 end
 
 exports('GetWeapons', GetWeapons)
+
+---@return table<string, Item>
+---@overload fun(name: string): Item?
+function GetItems(name)
+    local items = QBX.Shared.Items
+    return (name and items[name]) or items
+end
+
+exports('GetItems', GetItems)
+
+---@return table<string, true> Item names reserved for Qbox money accounts.
+function GetAccountItemNames()
+    return QBX.Shared.AccountItems
+end
+
+exports('GetAccountItemNames', GetAccountItemNames)
 
 ---@deprecated
 ---@return table<string, vector4>
