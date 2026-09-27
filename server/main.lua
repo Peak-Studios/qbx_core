@@ -150,6 +150,13 @@ end
 
 exports('GetItems', GetItems)
 
+---@return table<string, true> Item names reserved for Qbox money accounts.
+function GetAccountItemNames()
+    return QBX.Shared.AccountItems
+end
+
+exports('GetAccountItemNames', GetAccountItemNames)
+
 ---@deprecated
 ---@return table<string, vector4>
 function GetLocations()

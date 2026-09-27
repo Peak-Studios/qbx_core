@@ -34,6 +34,7 @@ server_scripts {
     'server/groups.lua',
     'server/functions.lua',
     'server/player.lua',
+    'server/migration.lua',
     'server/events.lua',
     'server/commands.lua',
     'server/loops.lua',

@@ -8,11 +8,26 @@ local function getBackend()
     return exports[resourceName]
 end
 
+local function waitForBackend()
+    local timeout = GetConvarInt('qbx:inventoryStartTimeout', 30000)
+    if timeout < 1000 then timeout = 30000 end
+    local startedAt = GetGameTimer()
+
+    while GetResourceState(resourceName) ~= 'started' do
+        if GetGameTimer() - startedAt >= timeout then
+            error(('%s did not start within %dms; refusing to load a player without its inventory backend'):format(resourceName, timeout))
+        end
+        Wait(100)
+    end
+
+    return exports[resourceName]
+end
+
 return {
     resourceName = resourceName,
 
     load = function(source, citizenid)
-        return getBackend():LoadInventory(source, citizenid)
+        return waitForBackend():LoadInventory(source, citizenid)
     end,
 
     save = function(identifier, offline)

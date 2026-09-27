@@ -79,6 +79,13 @@ end
 ---@param deferrals Deferrals
 local function onPlayerConnecting(name, _, deferrals)
     local src = source --[[@as string]]
+    if QBX.InventoryMigrationInProgress then
+        deferrals.defer()
+        Wait(0)
+        deferrals.done('The server is migrating inventories. Please reconnect shortly.')
+        return
+    end
+
     local license = GetPlayerIdentifierByType(src, 'license2') or GetPlayerIdentifierByType(src, 'license')
     local identifiers = getIdentifiers(src)
     deferrals.defer()

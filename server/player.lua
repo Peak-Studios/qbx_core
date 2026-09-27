@@ -8,10 +8,6 @@ local maxJobsPerPlayer = GetConvarInt('qbx:max_jobs_per_player', 1)
 local maxGangsPerPlayer = GetConvarInt('qbx:max_gangs_per_player', 1)
 local setJobReplaces = GetConvar('qbx:setjob_replaces', 'true') == 'true'
 local setGangReplaces = GetConvar('qbx:setgang_replaces', 'true') == 'true'
-local accounts = json.decode(GetConvar('inventory:accounts', '["money"]')) or { 'money' }
-if type(accounts) ~= 'table' then accounts = { 'money' } end
-local accountsAsItems = {}
-for i = 1, #accounts do accountsAsItems[accounts[i]] = true end
 
 -- Numeric metadata mirrored from client statebags. Values are validated and
 -- clamped before being persisted, so a spoofed statebag can't corrupt or crash
@@ -35,6 +31,19 @@ local function savePlayer(player)
     else
         Save(player.PlayerData.source)
     end
+end
+
+local function saveInventory(identifier, offline)
+    local ok, saved = pcall(inventory.save, identifier, offline)
+    if not ok then
+        lib.print.error(('Inventory save failed for %s: %s'):format(tostring(identifier), tostring(saved)))
+        return false
+    end
+    if saved ~= true then
+        lib.print.error(('Inventory save failed for %s; the backend did not confirm persistence'):format(tostring(identifier)))
+        return false
+    end
+    return true
 end
 
 ---@param citizenid string
@@ -64,34 +73,6 @@ local function getLoadedOrOfflinePlayer(citizenid)
     return GetPlayerByCitizenId(citizenid) or GetOfflinePlayer(citizenid)
 end
 
----@param name string
----@return string
-local function toAccountItemName(name)
-    return name == 'cash' and 'money' or name
-end
-
-local function syncAccountItem(source, account, balance)
-    local itemName = toAccountItemName(account)
-    if not accountsAsItems[itemName] then return end
-
-    local currentAmount = inventory.getItemCount(source, itemName) or 0
-    if balance > currentAmount then
-        if not inventory.addItem(source, itemName, balance - currentAmount) then
-            lib.print.warn(('Unable to sync %s account item for player %s'):format(itemName, source))
-        end
-    elseif currentAmount > balance then
-        local toRemove = currentAmount - balance
-        for _, item in ipairs(inventory.getItemsByName(source, itemName) or {}) do
-            if toRemove <= 0 then break end
-            local amount = math.min(toRemove, tonumber(item.amount) or 0)
-            if amount > 0 and inventory.removeItem(source, itemName, amount, item.slot) then
-                toRemove = toRemove - amount
-            end
-        end
-        if toRemove > 0 then lib.print.warn(('Unable to sync %s account item for player %s'):format(itemName, source)) end
-    end
-end
-
 ---@param source Source
 ---@param message string
 local function dropForExploit(source, message)
@@ -111,6 +92,11 @@ end
 ---@param newData? PlayerEntity
 ---@return boolean success
 function Login(source, citizenid, newData)
+    if QBX.InventoryMigrationInProgress then
+        lib.print.warn(('Rejected character login for %s while inventory migration is in progress'):format(tostring(source)))
+        return false
+    end
+
     if not source or source == '' then
         lib.print.error('No source given at login stage')
         return false
@@ -765,7 +751,10 @@ function Logout(source)
     player.PlayerData.metadata.stress = playerState?.stress or player.PlayerData.metadata.stress
 
     player.PlayerData.lastLoggedOut = os.time()
-    Save(player.PlayerData.source)
+    if not Save(player.PlayerData.source) then
+        lib.print.error(('Logout for %s stopped because inventory persistence failed'):format(tostring(source)))
+        return false
+    end
 
     TriggerClientEvent('QBCore:Client:OnPlayerUnload', source)
     TriggerEvent('QBCore:Server:OnPlayerUnload', source)
@@ -776,6 +765,7 @@ function Logout(source)
     GlobalState.PlayerCount -= 1
     TriggerClientEvent('qbx_core:client:playerLoggedOut', source)
     TriggerEvent('qbx_core:server:playerLoggedOut', source)
+    return true
 end
 
 exports('Logout', Logout)
@@ -787,6 +777,8 @@ exports('Logout', Logout)
 ---@param Offline boolean
 ---@return Player player
 function CreatePlayer(playerData, Offline)
+    if QBX.InventoryMigrationInProgress then error('Cannot create a player while inventory migration is in progress') end
+
     local self = {}
     self.Functions = {}
     self.PlayerData = playerData
@@ -985,10 +977,6 @@ function CreatePlayer(playerData, Offline)
     self.PlayerData.items = loadedItems
 
     if not self.Offline then
-        for moneyType, balance in pairs(self.PlayerData.money) do
-            syncAccountItem(self.PlayerData.source, moneyType, balance)
-        end
-
         local ped = GetPlayerPed(self.PlayerData.source)
         SetPedArmour(ped, self.PlayerData.metadata.armor)
         -- At this point we are safe to emit new instance to third party resource for load handling
@@ -1114,7 +1102,7 @@ function Save(source)
         playerData.metadata.stress = playerState.stress or 0
     end
 
-    inventory.save(source)
+    local inventorySaved = saveInventory(source)
 
     CreateThread(function()
         storage.upsertPlayerEntity({
@@ -1123,6 +1111,7 @@ function Save(source)
         })
     end)
     lib.print.verbose(('%s PLAYER SAVED!'):format(playerData.name))
+    return inventorySaved
 end
 
 exports('Save', Save)
@@ -1134,7 +1123,7 @@ function SaveOffline(playerData)
         return
     end
 
-    inventory.save(playerData, true)
+    local inventorySaved = saveInventory(playerData, true)
 
     CreateThread(function()
         storage.upsertPlayerEntity({
@@ -1143,6 +1132,7 @@ function SaveOffline(playerData)
         })
     end)
     lib.print.verbose(('%s OFFLINE PLAYER SAVED!'):format(playerData.name))
+    return inventorySaved
 end
 
 exports('SaveOffline', SaveOffline)
@@ -1314,7 +1304,6 @@ local function emitMoneyEvents(source, playerMoney, moneyType, amount, actionTyp
         TriggerClientEvent('qb-phone:client:RemoveBankMoney', source, amount)
     end
 
-    syncAccountItem(source, moneyType, playerMoney[moneyType])
 end
 
 ---@param value unknown
